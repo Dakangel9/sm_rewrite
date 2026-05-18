@@ -12,9 +12,9 @@
 
 static ISimpleAudioVolume *GetSimpleAudioVolume();
 
-DEFINE_GUID(IID_IMMDeviceEnumerator, 0XA95664D2, 0X9614, 0X4F35, 0XA7, 0X46, 0XDE, 0X8D, 0XB6, 0X36, 0X17, 0XE6);
-DEFINE_GUID(CLSID_MMDeviceEnumerator, 0XBCDE0395, 0XE52F, 0X467C, 0X8E, 0X3D, 0XC4, 0X57, 0X92, 0X91, 0X69, 0X2E);
-DEFINE_GUID(IID_IAudioSessionManager, 0X77AA99A0, 0X1BD6, 0X484F, 0X8B, 0XC7, 0X2C, 0X65, 0X4C, 0X9A, 0X9B, 0X6F);
+//DEFINE_GUID(IID_IMMDeviceEnumerator, 0XA95664D2, 0X9614, 0X4F35, 0XA7, 0X46, 0XDE, 0X8D, 0XB6, 0X36, 0X17, 0XE6);
+//DEFINE_GUID(CLSID_MMDeviceEnumerator, 0XBCDE0395, 0XE52F, 0X467C, 0X8E, 0X3D, 0XC4, 0X57, 0X92, 0X91, 0X69, 0X2E);
+//DEFINE_GUID(IID_IAudioSessionManager, 0X77AA99A0, 0X1BD6, 0X484F, 0X8B, 0XC7, 0X2C, 0X65, 0X4C, 0X9A, 0X9B, 0X6F);
 
 static void InitializeCom(void) {
   static bool com_initialized;
@@ -60,7 +60,7 @@ static ISimpleAudioVolume *GetSimpleAudioVolume(void) {
   InitializeCom();
   
   result = CoCreateInstance(&CLSID_MMDeviceEnumerator,
-      NULL, CLSCTX_INPROC_SERVER, &IID_IMMDeviceEnumerator, &device_enumerator);
+    NULL, CLSCTX_INPROC_SERVER, &IID_IMMDeviceEnumerator, (void**)&device_enumerator);
   if (FAILED(result) || device_enumerator == NULL)
     goto done;
   
@@ -68,7 +68,7 @@ static ISimpleAudioVolume *GetSimpleAudioVolume(void) {
   if (FAILED(result) || device == NULL)
     goto done;
   
-  result = IMMDevice_Activate(device, &IID_IAudioSessionManager, CLSCTX_INPROC_SERVER, NULL, &audio_session_manager);
+  result = IMMDevice_Activate(device, &IID_IAudioSessionManager, CLSCTX_INPROC_SERVER, NULL, (void**)&audio_session_manager);
   if (FAILED(result) || audio_session_manager == NULL)
     goto done;
   result = IAudioSessionManager_GetSimpleAudioVolume(audio_session_manager, &GUID_NULL, 0, &simple_audio_volume);
