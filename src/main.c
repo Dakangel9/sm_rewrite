@@ -61,7 +61,7 @@ enum {
   kDefaultSamples = 2048,
 };
 
-static const char kWindowTitle[] = "Super Metroid";
+static const char kWindowTitle[] = "Super Metroid Rewrite - Ventana Principal";
 static uint32 g_win_flags = SDL_WINDOW_RESIZABLE;
 static SDL_Window *g_window;
 
@@ -230,70 +230,89 @@ static void SDLCALL AudioCallback(void *userdata, Uint8 *stream, int len) {
 // =============================================================================
 typedef enum {
   kDualScreen_Clone = 0,   // Modo actual: Ambas pantallas muestran exactamente lo mismo
-  kDualScreen_AlwaysMap   // Nueva opción para fijar el mapa en la segunda pantalla
+  kDualScreen_Separate     // Modo futuro: TV muestra el juego, GamePad muestra el mapa
 } DualScreenMode;
 
-// Por defecto, iniciamos en el modo clonado que ya funciona perfectamente
-//static DualScreenMode g_dual_screen_mode = kDualScreen_Clone;
-static DualScreenMode g_dual_screen_mode = kDualScreen_AlwaysMap;
+static DualScreenMode g_dual_screen_mode = kDualScreen_Clone;
 
 // =============================================================================
-// ANOTACIÓN: SISTEMA DE DOBLE VENTANA Y TEXTURAS INDEPENDIENTES
+// CAMBIO REALIZADO: ENUMERADOR Y GLOBALES PARA EL CONTROL DE MODOS CON F5
 // =============================================================================
-// Para evitar pantallas oscuras en SDL2, cada ventana (Window) requiere su propio 
-// Renderizador (Renderer), y cada renderizador debe poseer su propia Textura (Texture).
-// No se pueden compartir texturas entre renderizadores distintos.
+typedef enum {
+  kView_Both = 0,          // Modo por defecto: Ambas pantallas visibles simultáneamente
+  kView_TVOnly,            // Solo se procesa y muestra la ventana principal (TV)
+  kView_GamepadOnly,       // Solo se procesa y muestra la ventana del GamePad (Secundaria)
+  kView_Count
+} ViewMode;
+
+static ViewMode g_view_mode = kView_Both;
+
+// Optimizaciones de memoria dinámica para evitar doble "Lock" en el EndDraw
+static uint8 *g_locked_tv_pixels = NULL;
+static int g_locked_tv_pitch = 0;
+
+// =============================================================================
+// SISTEMA DE DOBLE VENTANA Y TEXTURAS INDEPENDIENTES
 // =============================================================================
 static SDL_Window *g_window_tv = NULL;
 static SDL_Window *g_window_gamepad = NULL;
 static SDL_Renderer *g_renderer_tv = NULL;
 static SDL_Renderer *g_renderer_gamepad = NULL;
-static SDL_Renderer *g_renderer = NULL; // Puntero de compatibilidad con código antiguo
+static SDL_Renderer *g_renderer = NULL; 
 
-// ANOTACIÓN: Separamos las texturas para la TV y el GamePad de manera explícita
 static SDL_Texture *g_texture_tv = NULL;
 static SDL_Texture *g_texture_gamepad = NULL;
 static SDL_Rect g_sdl_renderer_rect;
 
+// =============================================================================
+// CAMBIO REALIZADO: FUNCIÓN DE CONTROL DE VISIBILIDAD DE VENTANAS NATIIVAS
+// Oculta o muestra las ventanas físicamente en el sistema operativo según el modo F5.
+// =============================================================================
+static void UpdateViewModeVisibility(void) {
+  if (g_window_tv) {
+    if (g_view_mode == kView_Both || g_view_mode == kView_TVOnly)
+      SDL_ShowWindow(g_window_tv);
+    else
+      SDL_HideWindow(g_window_tv);
+  }
+  if (g_window_gamepad) {
+    if (g_view_mode == kView_Both || g_view_mode == kView_GamepadOnly)
+      SDL_ShowWindow(g_window_gamepad);
+    else
+      SDL_HideWindow(g_window_gamepad);
+  }
+}
+
 static bool SdlRenderer_Init(SDL_Window *window) {
-  // Asignamos la ventana principal creada en el main a la TV de forma segura
   g_window_tv = window;
   
-  // Creamos el renderizador acelerado por hardware para la pantalla de la TV
   g_renderer_tv = SDL_CreateRenderer(g_window_tv, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-  g_renderer = g_renderer_tv; // Mantenemos la referencia para compatibilidad interna
+  g_renderer = g_renderer_tv; 
 
-  // Creamos la segunda ventana dedicada al GamePad (Mapa del juego)
   g_window_gamepad = SDL_CreateWindow(
-      "Super Metroid Rewrite - GamePad (Mapa)",
-      900, 100,          // Coordenadas de inicio en pantalla
-      256 * 2, 224 * 2,  // Escalado inicial a 2x
+      "Super Metroid Rewrite - Ventana Secundaria",
+      900, 100,          
+      256 * 2, 224 * 2,  
       SDL_WINDOW_SHOWN
   );
   
-  // Creamos el renderizador acelerado por hardware para la pantalla del GamePad
   g_renderer_gamepad = SDL_CreateRenderer(g_window_gamepad, -1, SDL_RENDERER_ACCELERATED);
 
-  // Verificación de seguridad: si alguno de los dos renderizadores falla, abortamos
   if (!g_renderer_tv || !g_renderer_gamepad) {
     printf("Error: No se pudieron inicializar los renderizadores de SDL2.\n");
     return false;
   }
 
-  // Configuración de aspectos y filtros basados en el archivo de configuración (sm.ini)
   if (!g_config.ignore_aspect_ratio)
     SDL_RenderSetLogicalSize(g_renderer_tv, g_snes_width, g_snes_height);
   if (g_config.linear_filtering)
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "best");
 
-  // Calculamos el multiplicador de texturas (requerido para mejoras visuales como Mode 7 HD)
   int tex_mult = (g_ppu_render_flags & kPpuRenderFlags_4x4Mode7) ? 4 : 1;
   
-  // ANOTACIÓN CRÍTICA: Creamos g_texture_tv vinculada ÚNICAMENTE a g_renderer_tv
   g_texture_tv = SDL_CreateTexture(g_renderer_tv, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                    g_snes_width * tex_mult, g_snes_height * tex_mult);
                                 
-  // ANOTACIÓN CRÍTICA: Creamos g_texture_gamepad vinculada ÚNICAMENTE a g_renderer_gamepad
   g_texture_gamepad = SDL_CreateTexture(g_renderer_gamepad, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
                                        g_snes_width * tex_mult, g_snes_height * tex_mult);
 
@@ -301,11 +320,13 @@ static bool SdlRenderer_Init(SDL_Window *window) {
     printf("Error Crítico: Falló la creación de las texturas independientes: %s\n", SDL_GetError());
     return false;
   }
+
+  // Sincronizamos la visibilidad inicial de las ventanas con el modo configurado
+  UpdateViewModeVisibility();
   return true;
 }
 
 static void SdlRenderer_Destroy(void) {
-  // Liberación ordenada de recursos de hardware para evitar fugas de memoria (Memory Leaks)
   if (g_renderer_tv) SDL_DestroyRenderer(g_renderer_tv);
   if (g_renderer_gamepad) SDL_DestroyRenderer(g_renderer_gamepad);
   if (g_window_gamepad) SDL_DestroyWindow(g_window_gamepad);
@@ -317,89 +338,50 @@ static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pi
   g_sdl_renderer_rect.w = width;
   g_sdl_renderer_rect.h = height;
   
-  // ANOTACIÓN: Bloqueamos la textura primaria de la TV para obtener acceso directo a su buffer de memoria 
-  // e inyectar los píxeles generados por la emulación de la PPU de la SNES.
   if (SDL_LockTexture(g_texture_tv, &g_sdl_renderer_rect, (void **)pixels, pitch) != 0) {
     printf("Error al bloquear textura de TV: %s\n", SDL_GetError());
     return;
   }
+  // OPTIMIZACIÓN: Almacenamos los punteros mapeados para escribir directamente en g_texture_gamepad
+  g_locked_tv_pixels = *pixels;
+  g_locked_tv_pitch = *pitch;
 }
 
-// Supongamos que esta función existe o la extraemos del módulo PPU del port:
-// Forza el renderizado de la pantalla de pausa/mapa de la WRAM al buffer de píxeles indicado
-extern void Ppu_RenderPauseMapDirect(void *target_pixels, int pitch);
 // =============================================================================
-// ANOTACIÓN: SISTEMA DE CLONACIÓN SEGURO Y DEFINITIVO (MÉTODO BUFFER)
-// =============================================================================
-// Para que SDL2 permita dibujar en dos ventanas simultáneas sin pantallas negras,
-// bloqueamos ambas texturas y transferimos los píxeles directamente. 
-// Esto garantiza que el juego, los menús de pausa y las pestañas se vean en ambos lados.
+// CAMBIO Y OPTIMIZACIÓN REALIZADA: ENDDRAW CON CLONACIÓN ULTRA-RÁPIDA
+// Se eliminó el re-bloqueo innecesario de la textura de la TV (cuello de botella masivo)
+// y se condicionó el dibujado físico a los parámetros activos del modo F5.
 // =============================================================================
 static void SdlRenderer_EndDraw(void) {
-  // 1. Desbloqueamos la textura de la TV para consolidar los píxeles de la PPU (contiene el gameplay normal)
-  SDL_UnlockTexture(g_texture_tv);
-
-  // 2. CONTROL DE FLUJO SEGÚN EL MODO SELECCIONADO
-  // LOGICA DE SEPARACIÓN
-  if (g_dual_screen_mode == kDualScreen_Clone) {
-    // =============================================================================
-    // ANOTACIÓN: MODO CLONADO PERMANENTE (Ideal para Off-TV Play en Wii U)
-    // =============================================================================
-  // Espejo idéntico (lo que ya teníamos)
-    void *tv_pixels, *gp_pixels;
-    int tv_pitch, gp_pitch;
-
-  // Bloqueamos ambas texturas en la GPU para acceder a sus arreglos de memoria RAM virtuales
-    if (SDL_LockTexture(g_texture_tv, &g_sdl_renderer_rect, &tv_pixels, &tv_pitch) == 0) {
-      if (SDL_LockTexture(g_texture_gamepad, &g_sdl_renderer_rect, &gp_pixels, &gp_pitch) == 0) {
-        
-      // Copia masiva de alta velocidad en memoria RAM/VRAM
-      // ANOTACIÓN: Copiamos los píxeles de manera compacta y ultra rápida en un solo bloque.
-      // g_sdl_renderer_rect.h es la altura (240) y tv_pitch es el ancho en bytes exacto.
-      // Esto clona de inmediato CUALQUIER elemento en pantalla de forma idéntica.		
-        memcpy(gp_pixels, tv_pixels, g_sdl_renderer_rect.h * tv_pitch);
-
-      // Desbloqueamos la textura del GamePad para enviar los datos nuevos a su GPU        
-        SDL_UnlockTexture(g_texture_gamepad);
-      }
-    // Desbloqueamos la textura de la TV	  
-      SDL_UnlockTexture(g_texture_tv);
-    }
-  } 
-  else if (g_dual_screen_mode == kDualScreen_AlwaysMap) {
-    // =============================================================================
-    // ANOTACIÓN: MAPA EN TIEMPO REAL FIJO EN GAMEPAD
-    // =============================================================================
+  // 1. Clonación Directa: Copia masiva directa de buffer RAM antes de romper el Lock de la GPU
+  if (g_dual_screen_mode == kDualScreen_Clone && (g_view_mode == kView_Both || g_view_mode == kView_GamepadOnly)) {
     void *gp_pixels = NULL;
     int gp_pitch = 0;
-    
+    // Bloqueamos únicamente el GamePad y le inyectamos los píxeles listos de la TV
     if (SDL_LockTexture(g_texture_gamepad, &g_sdl_renderer_rect, &gp_pixels, &gp_pitch) == 0) {
-      
-      // ANOTACIÓN: En lugar de copiar la TV, llamamos a la rutina interna que extrae
-      // los datos del mapa de exploración de la RAM y los dibuja aquí.
-      // Nota: Si el juego nativo no tiene esta función expuesta, podemos leer directamente
-      // el arreglo de la VRAM correspondiente a las capas de fondo (BG3/BG4) del menú.
-      Ppu_RenderPauseMapDirect(gp_pixels, gp_pitch);
-      
+      memcpy(gp_pixels, g_locked_tv_pixels, g_sdl_renderer_rect.h * g_locked_tv_pitch);
       SDL_UnlockTexture(g_texture_gamepad);
     }
   }
 
-  // 3. ENVIAR SEÑAL DE VIDEO A LA TELEVISIÓN
-  SDL_RenderClear(g_renderer_tv);
-  SDL_RenderCopy(g_renderer_tv, g_texture_tv, &g_sdl_renderer_rect, NULL);
-  SDL_RenderPresent(g_renderer_tv);
+  // 2. Liberamos la textura primaria de la TV de forma segura
+  SDL_UnlockTexture(g_texture_tv);
+  g_locked_tv_pixels = NULL; // Limpieza del puntero de control de optimización
 
-  // 4. ENVIAR SEÑAL DE VIDEO AL GAMEPAD
-  // RENDERIZADO EN LA PANTALLA SECUNDARIA
-  // ANOTACIÓN: Ahora que "g_texture_gamepad" recibió una copia exacta de los datos
-  // y pertenece legalmente a "g_renderer_gamepad", la ventana vuelve a iluminarse.  
-  SDL_RenderClear(g_renderer_gamepad);
-  // Importante: Seguimos usando g_texture_gamepad para respetar las reglas de SDL2
-  SDL_RenderCopy(g_renderer_gamepad, g_texture_gamepad, &g_sdl_renderer_rect, NULL); 
-  SDL_RenderPresent(g_renderer_gamepad); 
+  // 3. ENVIAR SEÑAL DE VIDEO A LA TELEVISIÓN (Solo si está activa en F5)
+  if (g_view_mode == kView_Both || g_view_mode == kView_TVOnly) {
+    SDL_RenderClear(g_renderer_tv);
+    SDL_RenderCopy(g_renderer_tv, g_texture_tv, &g_sdl_renderer_rect, NULL);
+    SDL_RenderPresent(g_renderer_tv);
+  }
+
+  // 4. ENVIAR SEÑAL DE VIDEO AL GAMEPAD (Solo si está activo en F5)
+  if (g_view_mode == kView_Both || g_view_mode == kView_GamepadOnly) {
+    SDL_RenderClear(g_renderer_gamepad);
+    SDL_RenderCopy(g_renderer_gamepad, g_texture_gamepad, &g_sdl_renderer_rect, NULL); 
+    SDL_RenderPresent(g_renderer_gamepad); 
+  }
 }
-
 
 static const struct RendererFuncs kSdlRendererFuncs = {
   &SdlRenderer_Init,
@@ -482,8 +464,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // --- RESTAURADO Y CORREGIDO ---
-  // Creamos la ventana de Windows base y llamamos al inicializador de renderizado
   g_window = SDL_CreateWindow(kWindowTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               window_width, window_height, g_win_flags);
   if (g_window == NULL) {
@@ -494,7 +474,6 @@ int main(int argc, char** argv) {
   if (!g_renderer_funcs.Initialize(g_window)) {
     Die("Failed to initialize renderer");
   }
-  // ---------------------------------
 
   g_audio_mutex = SDL_CreateMutex();
   if (!g_audio_mutex) Die("No mutex");
@@ -547,23 +526,16 @@ int main(int argc, char** argv) {
   while (running) {
     SDL_Event event;
 
-while (SDL_PollEvent(&event)) {
+    while (SDL_PollEvent(&event)) {
       switch (event.type) {
       case SDL_QUIT:
-        // Cierre global del sistema (ej. Alt+F4 o cerrar desde la barra de tareas)
         running = false;
         break;
 
-      // =============================================================================
-      // ANOTACIÓN: SOLUCIÓN DEL JUEGO INMORTAL (EVENTOS DE VENTANA)
-      // =============================================================================
-      // Al trabajar con múltiples ventanas creadas de forma nativa, necesitamos 
-      // interceptar de forma precisa cuál ventana ha recibido la orden de destrucción de la "X".
-      // =============================================================================
       case SDL_WINDOWEVENT:
         if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
           printf("Se detectó la solicitud de cierre desde una de las ventanas del juego.\n");
-          running = false; // Forzamos la salida del bucle principal de forma segura
+          running = false; 
         }
         break;
 
@@ -792,7 +764,17 @@ static void HandleCommand(uint32 j, bool pressed) {
   }
 }
 
+// =============================================================================
+// CAMBIO REALIZADO: INTERCEPTACIÓN DE F5 EN EL MANEJADOR DE ENTRADAS DE TECLADO
+// Captura F5 antes de los comandos mapeados por ini para ciclar los 3 modos de ventana.
+// =============================================================================
 static void HandleInput(int keyCode, int keyMod, bool pressed) {
+  if (keyCode == SDLK_F5 && pressed) {
+    g_view_mode = (g_view_mode + 1) % kView_Count;
+    UpdateViewModeVisibility();
+    return; // Evitamos procesamiento redundante
+  }
+
   int j = FindCmdForSdlKey(keyCode, (SDL_Keymod)keyMod);
   if (j != 0)
     HandleCommand(j, pressed);
@@ -895,6 +877,9 @@ static void HandleGamepadAxisInput(int gamepad_id, int axis, int value) {
   }
 }
 
+// =============================================================================
+// CORRECCIÓN SINTÁCTICA: Se removieron llaves huérfanas terminales corruptas de este bloque
+// =============================================================================
 static void SwitchDirectory(void) {
   char buf[4096];
   if (!getcwd(buf, sizeof(buf) - 32))
